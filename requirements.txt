@@ -1,0 +1,7 @@
+pandas
+sqlalchemy
+streamlit>=1.32.0
+azure-identity
+pyodbc
+openai>=1.30.0
+plotly>=5.20.0
