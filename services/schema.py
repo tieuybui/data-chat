@@ -7,14 +7,15 @@ import streamlit as st
 import pandas as pd
 
 _TABLES_SQL = """
-SELECT TABLE_NAME
+SELECT TABLE_SCHEMA, TABLE_NAME
 FROM INFORMATION_SCHEMA.TABLES
 WHERE TABLE_TYPE = 'BASE TABLE'
-ORDER BY TABLE_NAME
+ORDER BY TABLE_SCHEMA, TABLE_NAME
 """
 
 _COLUMNS_SQL = """
 SELECT
+    c.TABLE_SCHEMA,
     c.TABLE_NAME,
     c.COLUMN_NAME,
     c.DATA_TYPE,
@@ -25,21 +26,7 @@ INNER JOIN INFORMATION_SCHEMA.TABLES t
     ON c.TABLE_NAME = t.TABLE_NAME
     AND c.TABLE_SCHEMA = t.TABLE_SCHEMA
 WHERE t.TABLE_TYPE = 'BASE TABLE'
-ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
-"""
-
-# Try to pull business descriptions from data-catalog dd_tables/dd_columns if available
-_DD_TABLES_SQL = """
-SELECT table_name, description
-FROM dd_tables
-WHERE description IS NOT NULL AND description <> ''
-"""
-
-_DD_COLUMNS_SQL = """
-SELECT table_name, column_name, description, business_name
-FROM dd_columns
-WHERE (description IS NOT NULL AND description <> '')
-   OR (business_name IS NOT NULL AND business_name <> '')
+ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
 """
 
 
@@ -62,53 +49,23 @@ def _build_schema_context() -> str:
 
     tables_df = run_query(_TABLES_SQL)
     cols_df = run_query(_COLUMNS_SQL)
-
-    # Try to enrich with business descriptions from data-catalog metadata
-    dd_tables: dict[str, str] = {}
-    dd_cols: dict[tuple, dict] = {}
-    try:
-        for _, r in run_query(_DD_TABLES_SQL).iterrows():
-            dd_tables[r["table_name"]] = r["description"]
-        for _, r in run_query(_DD_COLUMNS_SQL).iterrows():
-            dd_cols[(r["table_name"], r["column_name"])] = {
-                "desc": r.get("description", ""),
-                "biz": r.get("business_name", ""),
-            }
-    except Exception:
-        pass  # metadata tables may not exist yet
-
-    return _format_schema(tables_df, cols_df, dd_tables, dd_cols)
+    print(f"\n[SCHEMA] {len(tables_df)} tables loaded")
+    return _format_schema(tables_df, cols_df)
 
 
-def _format_schema(
-    tables_df: pd.DataFrame,
-    cols_df: pd.DataFrame,
-    dd_tables: dict,
-    dd_cols: dict,
-) -> str:
+def _format_schema(tables_df: pd.DataFrame, cols_df: pd.DataFrame) -> str:
     cols_by_table: dict[str, list[str]] = {}
     for _, row in cols_df.iterrows():
-        tbl = row["TABLE_NAME"]
+        key = f"{row['TABLE_SCHEMA']}.{row['TABLE_NAME']}"
         nullable = "" if row["IS_NULLABLE"] == "YES" else " NOT NULL"
         col_line = f"  - {row['COLUMN_NAME']} ({row['DATA_TYPE'].upper()}{nullable})"
-
-        meta = dd_cols.get((tbl, row["COLUMN_NAME"]), {})
-        if meta.get("biz"):
-            col_line += f" — {meta['biz']}"
-        if meta.get("desc"):
-            col_line += f": {meta['desc']}"
-
-        cols_by_table.setdefault(tbl, []).append(col_line)
+        cols_by_table.setdefault(key, []).append(col_line)
 
     lines = []
     for _, row in tables_df.iterrows():
-        tbl = row["TABLE_NAME"]
-        desc = dd_tables.get(tbl, "")
-        header = f"TABLE: {tbl}"
-        if desc:
-            header += f"  -- {desc}"
-        lines.append(header)
-        for col in cols_by_table.get(tbl, []):
+        full_name = f"{row['TABLE_SCHEMA']}.{row['TABLE_NAME']}"
+        lines.append(f"TABLE: {full_name}")
+        for col in cols_by_table.get(full_name, []):
             lines.append(col)
         lines.append("")
 

@@ -4,15 +4,30 @@ Ask questions in natural language; AI generates SQL, executes it, and returns
 insights + interactive charts.
 """
 
-import streamlit as st
+from dotenv import load_dotenv
+load_dotenv()
 
-from config.settings import ENV_CONFIGS
-from core.database import check_odbc_driver, run_query
+import streamlit as st
+from streamlit_local_storage import LocalStorage
+
+from config.settings import ENV_CONFIGS, AZURE_OPENAI_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT, FABRIC_DATABASE
+from core.auth import check_password, restore_auth, logout
+from core.database import list_fabric_databases, check_odbc_driver, run_query
 from services.schema import get_schema_context, invalidate_schema_cache
 from services.azure_ai import DataChatAI, AIError
 from ui.css import inject_css
 
-# ─── Page config (must be first Streamlit call) ───────────────────────────────
+# ─── Auth (y chang data-catalog) ──────────────────────────────────────────────
+ls = LocalStorage()
+
+if "_ls_synced" not in st.session_state:
+    st.session_state["_ls_synced"] = True
+    st.rerun()
+
+restore_auth(ls)
+check_password()
+
+# ─── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Data Chat",
     page_icon="💬",
@@ -49,6 +64,8 @@ def render_response(resp: dict):
 with st.sidebar:
     st.markdown("## 💬 Data Chat")
     st.caption("AI analytics trên dữ liệu lakehouse của bạn")
+    if st.button("🚪 Đăng xuất", use_container_width=True):
+        logout(ls)
     st.divider()
 
     # Environment selector
@@ -69,32 +86,64 @@ with st.sidebar:
     )
     if chosen_env != prev_env:
         st.session_state.env = chosen_env
+        st.session_state.pop("fabric_database", None)
         invalidate_schema_cache()
         st.rerun()
+
+    # Fabric database selector
+    if st.session_state.env == "fabric":
+        if "fabric_db_list" not in st.session_state:
+            with st.spinner("Đang tải danh sách database..."):
+                db_list = list_fabric_databases()
+                if not db_list and FABRIC_DATABASE:
+                    db_list = [FABRIC_DATABASE]
+                st.session_state.fabric_db_list = db_list
+
+        db_list = st.session_state.get("fabric_db_list", [FABRIC_DATABASE])
+
+        if "fabric_database" not in st.session_state:
+            default_db = FABRIC_DATABASE if FABRIC_DATABASE in db_list else (db_list[0] if db_list else "")
+            st.session_state.fabric_database = default_db
+
+        prev_db = st.session_state.fabric_database
+        chosen_db = st.selectbox(
+            "Database / Warehouse",
+            options=db_list,
+            index=db_list.index(prev_db) if prev_db in db_list else 0,
+            key="_db_selector",
+        )
+        if chosen_db != prev_db:
+            st.session_state.fabric_database = chosen_db
+            invalidate_schema_cache()
+            st.rerun()
 
     st.divider()
 
     # Azure OpenAI settings
     st.markdown("### 🤖 Azure OpenAI")
-    api_key = st.text_input(
-        "API Key",
-        type="password",
-        key="azure_api_key",
-        placeholder="••••••••••••••••",
-        help="Lấy từ Azure Portal → Azure OpenAI resource → Keys and Endpoint",
-    )
-    endpoint = st.text_input(
-        "Endpoint",
-        key="azure_endpoint",
-        placeholder="https://<resource>.openai.azure.com/",
-    )
-    deployment = st.text_input(
-        "Deployment Name",
-        key="azure_deployment",
-        value=st.session_state.get("azure_deployment", "gpt-4o"),
-        placeholder="gpt-4o",
-        help="Tên deployment trong Azure OpenAI Studio",
-    )
+    if AZURE_OPENAI_KEY and AZURE_OPENAI_ENDPOINT:
+        api_key = AZURE_OPENAI_KEY
+        endpoint = AZURE_OPENAI_ENDPOINT
+        deployment = AZURE_OPENAI_DEPLOYMENT
+        st.caption(f"Endpoint: `{endpoint}`")
+        st.caption(f"Deployment: `{deployment}`")
+    else:
+        api_key = st.text_input(
+            "API Key",
+            type="password",
+            key="azure_api_key",
+            placeholder="••••••••••••••••",
+        )
+        endpoint = st.text_input(
+            "Endpoint",
+            key="azure_endpoint",
+            value=st.session_state.get("azure_endpoint", ""),
+        )
+        deployment = st.text_input(
+            "Deployment Name",
+            key="azure_deployment",
+            value=st.session_state.get("azure_deployment", "gpt-5"),
+        )
 
     ai_ready = bool(api_key and endpoint and deployment)
     if not ai_ready:

@@ -19,38 +19,35 @@ FABRIC_DATABASE = os.environ.get("FABRIC_DATABASE", "")
 LOCAL_SERVER = os.environ.get("LOCAL_SERVER", ".")
 LOCAL_DATABASE = os.environ.get("LOCAL_DATABASE", "")
 
+AZURE_OPENAI_KEY = os.environ.get("AZURE_OPENAI_KEY", "")
+AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5")
+
+APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
+
+def fabric_odbc(database: str) -> str:
+    return (
+        f"DRIVER={{{ODBC_DRIVER}}};"
+        f"Server={FABRIC_SERVER},1433;"
+        f"Database={database};"
+        "Encrypt=yes;"
+        "TrustServerCertificate=no"
+    )
+
+
 # ─── Environment Configs ──────────────────────────────────
 ENV_CONFIGS: dict = {
-    "fabric_dev": {
-        "label": "Fabric - Dev",
+    "fabric": {
+        "label": "Fabric",
         "fabric": True,
-        "database": FABRIC_DATABASE,
-        "odbc": (
-            f"DRIVER={{{ODBC_DRIVER}}};"
-            f"Server={FABRIC_SERVER},1433;"
-            f"Database={FABRIC_DATABASE};"
-            "Encrypt=yes;"
-            "TrustServerCertificate=no"
-        ),
-    },
-    "fabric_prod": {
-        "label": "Fabric - Prod",
-        "fabric": True,
-        "database": FABRIC_DATABASE,
-        "odbc": (
-            f"DRIVER={{{ODBC_DRIVER}}};"
-            f"Server={FABRIC_SERVER},1433;"
-            f"Database={FABRIC_DATABASE};"
-            "Encrypt=yes;"
-            "TrustServerCertificate=no"
-        ),
     },
     "local": {
         "label": "Local SQL Server",
         "fabric": False,
-        "database": LOCAL_DATABASE,
         "odbc": (
-            "DRIVER={SQL Server};"
+            f"DRIVER={{{ODBC_DRIVER}}};"
             f"Server={LOCAL_SERVER};"
             f"Database={LOCAL_DATABASE};"
             "Trusted_Connection=yes;"

@@ -19,6 +19,7 @@ Database Schema:
 
 Rules:
 - Use T-SQL syntax (SQL Server / Microsoft Fabric compatible).
+- ALWAYS use the full schema-qualified table name exactly as shown in the schema (e.g. dbo.FactOpenOrders, not FactOpenOrders).
 - Add TOP 500 unless the user asks for all data or specifies a different limit.
 - Only write SELECT queries. Never write INSERT, UPDATE, DELETE, DROP, EXEC, or DDL.
 - Use meaningful column aliases (e.g. AS total_revenue, AS month_name).
@@ -90,7 +91,7 @@ class DataChatAI:
         self.client = AzureOpenAI(
             api_key=api_key,
             azure_endpoint=endpoint.rstrip("/"),
-            api_version="2024-08-01-preview",
+            api_version="2024-02-01",
         )
         self.deployment = deployment
 
@@ -177,15 +178,14 @@ class DataChatAI:
             resp = self.client.chat.completions.create(
                 model=self.deployment,
                 messages=messages,
-                temperature=0.05,
-                max_tokens=1200,
-                response_format={"type": "json_object"},
+                max_completion_tokens=8000,
             )
-            return json.loads(resp.choices[0].message.content)
-        except json.JSONDecodeError:
-            raw = resp.choices[0].message.content if resp else ""
+            raw = resp.choices[0].message.content or ""
+            parsed = _parse_json(raw)
+            if parsed is not None:
+                return parsed
             sql = _extract_sql_from_text(raw)
-            return {"sql": sql} if sql else {"sql": None, "message": "Failed to parse AI response."}
+            return {"sql": sql} if sql else {"sql": None, "message": f"Failed to parse AI response: {raw[:200]}"}
         except Exception as exc:
             raise AIError(f"Azure OpenAI API error: {exc}") from exc
 
@@ -208,18 +208,40 @@ class DataChatAI:
                     {"role": "system", "content": _INSIGHTS_SYSTEM},
                     {"role": "user", "content": user_msg},
                 ],
-                temperature=0.3,
-                max_tokens=900,
-                response_format={"type": "json_object"},
+                max_completion_tokens=4000,
             )
-            return json.loads(resp.choices[0].message.content)
+            raw = resp.choices[0].message.content or ""
+            parsed = _parse_json(raw)
+            if parsed is not None:
+                return parsed
         except Exception:
-            return {
-                "text": "_Dữ liệu đã được tải. Xem bảng bên dưới để biết chi tiết._",
-                "summary": question,
-                "chart_type": "table",
-                "chart_config": {},
-            }
+            pass
+        return {
+            "text": "_Dữ liệu đã được tải. Xem bảng bên dưới để biết chi tiết._",
+            "summary": question,
+            "chart_type": "table",
+            "chart_config": {},
+        }
+
+
+def _parse_json(text: str) -> dict | None:
+    """Extract and parse JSON from a response that may be wrapped in markdown."""
+    text = text.strip()
+    # Strip markdown code fences
+    match = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
+    if match:
+        text = match.group(1).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Try finding the first {...} block
+        match = re.search(r"\{[\s\S]+\}", text)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+    return None
 
 
 def _extract_sql_from_text(text: str) -> str | None:

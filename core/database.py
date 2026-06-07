@@ -10,9 +10,15 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
 
-from config.settings import ODBC_DRIVER, ENV_CONFIGS
+from config.settings import ODBC_DRIVER, FABRIC_SERVER, ENV_CONFIGS, fabric_odbc
 
 _SQL_COPT_SS_ACCESS_TOKEN = 1256
+
+_LIST_DATABASES_SQL = """
+SELECT name FROM sys.databases
+WHERE name NOT IN ('master','model','msdb','tempdb')
+ORDER BY name
+"""
 
 
 def check_odbc_driver():
@@ -22,7 +28,7 @@ def check_odbc_driver():
 
 
 def is_fabric() -> bool:
-    return st.session_state.get("env", "").startswith("fabric")
+    return st.session_state.get("env", "") == "fabric"
 
 
 @st.cache_resource(ttl=2400)
@@ -33,8 +39,18 @@ def _get_fabric_token():
     return token.token
 
 
+def _make_fabric_conn(database: str):
+    token = _get_fabric_token()
+    token_bytes = token.encode("utf-16-le")
+    token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+    conn = pyodbc.connect(fabric_odbc(database), attrs_before={_SQL_COPT_SS_ACCESS_TOKEN: token_struct})
+    return conn
+
+
 def _get_fabric_connection():
-    conn = st.session_state.get("_fabric_conn")
+    db = st.session_state.get("fabric_database", "")
+    cache_key = f"_fabric_conn_{db}"
+    conn = st.session_state.get(cache_key)
     if conn is not None:
         try:
             conn.cursor().execute("SELECT 1")
@@ -44,14 +60,23 @@ def _get_fabric_connection():
                 conn.close()
             except Exception:
                 pass
-
-    token = _get_fabric_token()
-    token_bytes = token.encode("utf-16-le")
-    token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
-    odbc_string = ENV_CONFIGS[st.session_state.env]["odbc"]
-    conn = pyodbc.connect(odbc_string, attrs_before={_SQL_COPT_SS_ACCESS_TOKEN: token_struct})
-    st.session_state["_fabric_conn"] = conn
+    conn = _make_fabric_conn(db)
+    st.session_state[cache_key] = conn
     return conn
+
+
+def list_fabric_databases() -> list[str]:
+    """Return available databases on the Fabric server."""
+    try:
+        conn = _make_fabric_conn("master")
+        cursor = conn.cursor()
+        cursor.execute(_LIST_DATABASES_SQL)
+        names = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return names
+    except Exception:
+        # Fallback: try without master (some Fabric endpoints restrict it)
+        return []
 
 
 @st.cache_resource
@@ -62,8 +87,12 @@ def _get_engine(env_key: str):
 
 def run_query(sql: str, params: dict | None = None) -> pd.DataFrame:
     """Execute a SELECT query and return a DataFrame."""
+    print(f"\n[SQL]\n{sql}\n")
     if is_fabric():
         conn = _get_fabric_connection()
-        return pd.read_sql(sql, conn)
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        columns = [col[0] for col in cursor.description]
+        return pd.DataFrame.from_records(cursor.fetchall(), columns=columns)
     with _get_engine(st.session_state.env).connect() as conn:
         return pd.read_sql(text(sql), conn, params=params)
