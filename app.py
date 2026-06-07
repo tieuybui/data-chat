@@ -9,8 +9,8 @@ from streamlit_local_storage import LocalStorage
 
 from config.settings import ENV_CONFIGS, AZURE_OPENAI_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT, FABRIC_DATABASE
 from core.auth import check_password, restore_auth, logout
-from core.database import list_fabric_databases, check_odbc_driver, run_query
-from services.schema import get_schema_context, invalidate_schema_cache
+from core.database import list_fabric_databases, check_odbc_driver, run_query, run_query_cached
+from services.schema import get_tables_context, get_schema_for_tables, get_schema_context, get_table_count, invalidate_schema_cache
 from services.azure_ai import DataChatAI, AIError
 from services.query_evaluator import QueryEvaluatorAI, QueryEvaluationError
 from ui.css import inject_css
@@ -232,14 +232,17 @@ check_odbc_driver()
 # Load schema metadata once per environment/database, then reuse cache.
 with st.spinner("Đang tải cấu trúc database..."):
     try:
-        schema_text = get_schema_context()
-        st.session_state["_schema_info"] = {
-            "tables": schema_text.count("TABLE:"),
-            "cols": schema_text.count("\n  - "),
-        }
+        tables_context = get_tables_context()
+        st.session_state["_schema_info"] = {"tables": get_table_count()}
     except Exception as exc:
         st.error(f"Không thể tải schema: {exc}")
         st.stop()
+
+def _cached_run_query(sql: str) -> pd.DataFrame:
+    env = st.session_state.get("env", "")
+    db = st.session_state.get("fabric_database", "") if env == "fabric" else env
+    return run_query_cached(sql, env, db)
+
 
 # Header
 env_label = env_labels[st.session_state.env]
@@ -247,8 +250,7 @@ info = st.session_state.get("_schema_info", {})
 st.markdown(f"# 💬 Data Chat")
 st.caption(
     f"Kết nối tới **{env_label}** · "
-    f"{info.get('tables', '?')} bảng · "
-    f"{info.get('cols', '?')} cột"
+    f"{info.get('tables', '?')} bảng"
 )
 
 data_tab, evaluator_tab = st.tabs(["💬 Data Chat", "✅ Đánh giá query"])
@@ -323,12 +325,13 @@ Hãy đặt câu hỏi bằng tiếng Việt hoặc tiếng Anh. Ví dụ:
                     )
 
                     with status:
-                        st.write("Đang tạo truy vấn SQL...")
+                        st.write("Đang xác định bảng và tạo truy vấn SQL...")
                         resp = ai.answer(
                             question=prompt,
-                            schema=schema_text,
+                            schema=tables_context,
                             history=history,
-                            run_query_fn=run_query,
+                            run_query_fn=_cached_run_query,
+                            get_focused_schema_fn=get_schema_for_tables,
                         )
 
                     status.update(label="Hoàn thành ✓", state="complete", expanded=False)
@@ -432,7 +435,7 @@ SELECT ...
                         st.write("Đang kiểm tra điều kiện và source...")
                         eval_resp = evaluator.evaluate(
                             message=evaluator_prompt,
-                            schema=schema_text,
+                            schema=get_schema_context(),
                             history=history,
                         )
                     status.update(label="Hoàn thành ✓", state="complete", expanded=False)

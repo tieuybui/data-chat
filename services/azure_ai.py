@@ -10,6 +10,20 @@ from typing import Callable
 import pandas as pd
 
 
+_TABLE_SELECTOR_SYSTEM = """\
+You are a data analyst working with a supply chain database.
+Given a user question, identify which tables are needed to answer it.
+
+{tables_context}
+
+Return ONLY a JSON array of the exact table names needed (e.g. ["dbo.FactSales", "dbo.DimProduct"]).
+- Include only tables directly relevant to the question.
+- Include at most 10 tables.
+- For fact tables, also include their related dimension tables if the question needs them.
+- Use exact table names as listed above.
+- Return [] only if truly no table could possibly match.
+"""
+
 _SQL_SYSTEM = """\
 You are a data analyst AI assistant for a supply chain lakehouse database.
 Your job is to write T-SQL queries to answer the user's questions about their data.
@@ -22,6 +36,7 @@ Rules:
 - ALWAYS use the full schema-qualified table name exactly as shown in the schema (e.g. dbo.FactOpenOrders, not FactOpenOrders).
 - Add TOP 500 unless the user asks for all data or specifies a different limit.
 - Only write SELECT queries. Never write INSERT, UPDATE, DELETE, DROP, EXEC, or DDL.
+- Never use SELECT *. Always list only the columns needed to answer the question.
 - Use meaningful column aliases (e.g. AS total_revenue, AS month_name).
 - When filtering dates, use CAST or CONVERT for string-to-date comparison.
 - Respond ONLY with valid JSON (no markdown, no explanation outside JSON):
@@ -101,11 +116,25 @@ class DataChatAI:
         schema: str,
         history: list[dict],
         run_query_fn: Callable[[str], pd.DataFrame],
+        get_focused_schema_fn: Callable[[list[str]], str] | None = None,
     ) -> dict:
-        """Full pipeline: question → SQL → execute → insights → chart."""
+        """Full pipeline: question → SQL → execute → insights → chart.
 
-        # ── Step 1: Generate SQL ─────────────────────────────────────
-        sql_result = self._generate_sql(question, schema, history)
+        When get_focused_schema_fn is provided, `schema` should be a compact
+        table-names list (from get_tables_context()). The method first asks the
+        AI to pick relevant tables (Pass 1), then fetches only their column
+        details before generating SQL (Pass 2).
+        """
+
+        # ── Step 1: Select relevant tables (two-pass mode) ───────────
+        if get_focused_schema_fn is not None:
+            selected = self._select_relevant_tables(question, schema, history)
+            effective_schema = get_focused_schema_fn(selected)
+        else:
+            effective_schema = schema
+
+        # ── Step 2: Generate SQL ─────────────────────────────────────
+        sql_result = self._generate_sql(question, effective_schema, history)
 
         if not sql_result.get("sql"):
             return {
@@ -165,6 +194,34 @@ class DataChatAI:
         }
 
     # ── Private helpers ──────────────────────────────────────────────
+
+    def _select_relevant_tables(self, question: str, tables_context: str, history: list[dict]) -> list[str]:
+        """Pass 1: ask AI to pick which tables are needed for the question."""
+        messages = [
+            {"role": "system", "content": _TABLE_SELECTOR_SYSTEM.format(tables_context=tables_context)}
+        ]
+        for m in history[-4:]:
+            messages.append({"role": m["role"], "content": str(m.get("content", ""))})
+        messages.append({"role": "user", "content": question})
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=messages,
+                max_completion_tokens=300,
+            )
+            raw = resp.choices[0].message.content or ""
+            parsed = _parse_json(raw)
+            if isinstance(parsed, list):
+                return [t for t in parsed if isinstance(t, str)]
+            match = re.search(r"\[.*?\]", raw, re.DOTALL)
+            if match:
+                result = json.loads(match.group(0))
+                if isinstance(result, list):
+                    return [t for t in result if isinstance(t, str)]
+        except Exception:
+            pass
+        return []
 
     def _generate_sql(self, question: str, schema: str, history: list[dict]) -> dict:
         messages = [{"role": "system", "content": _SQL_SYSTEM.format(schema=schema)}]

@@ -106,3 +106,13 @@ def run_query(sql: str, params: dict | None = None) -> pd.DataFrame:
         return pd.DataFrame.from_records(cursor.fetchall(), columns=columns)
     with _get_engine(st.session_state.env).connect() as conn:
         return pd.read_sql(text(sql), conn, params=params)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def run_query_cached(sql: str, env: str, database: str) -> pd.DataFrame:
+    """Cached version of run_query — same SQL + env + database returns cached DataFrame for 10 min."""
+    return run_query(sql)
+
+
+def invalidate_query_cache():
+    run_query_cached.clear()
