@@ -56,6 +56,27 @@ If the question cannot be answered from the available schema, return:
 {{"sql": null, "message": "Brief explanation of why"}}
 """
 
+_SQL_FIX_SYSTEM = """\
+You are a T-SQL expert. A query failed with an error. Fix the SQL so it runs correctly.
+
+Rules:
+- Return ONLY valid JSON (no markdown, no explanation outside JSON).
+- Keep the original intent of the query.
+- Only write SELECT queries.
+- Use full schema-qualified table names.
+
+{{
+  "sql": "SELECT ...",
+  "chart_suggestion": {{
+    "type": "bar|line|pie|scatter|area|histogram|table|none",
+    "x": "column_name_for_x_axis",
+    "y": "column_name_for_y_axis",
+    "color": null,
+    "title": "Descriptive chart title"
+  }}
+}}
+"""
+
 _INSIGHTS_SYSTEM = """\
 You are a data analyst providing concise insights about query results.
 Respond ONLY with valid JSON (no markdown outside the JSON):
@@ -149,18 +170,36 @@ class DataChatAI:
         sql = sql_result["sql"]
         chart_hint = sql_result.get("chart_suggestion", {})
 
-        # ── Step 2: Execute SQL ──────────────────────────────────────
+        # ── Step 2: Execute SQL (with one auto-fix retry on error) ──────────────────────────────────────
         try:
             df = run_query_fn(sql)
-        except Exception as exc:
-            return {
-                "error": f"**Lỗi thực thi SQL:** {exc}\n\nHãy thử diễn đạt lại câu hỏi của bạn.",
-                "insights": None,
-                "sql": sql,
-                "data": None,
-                "chart_fig": None,
-                "summary": f"SQL error for: {question}",
-            }
+        except Exception as first_exc:
+            # Ask AI to fix the SQL then retry once
+            fix_result = self._fix_sql(sql, str(first_exc))
+            fixed_sql = fix_result.get("sql") if fix_result else None
+            if fixed_sql and fixed_sql != sql:
+                chart_hint = fix_result.get("chart_suggestion", chart_hint)
+                sql = fixed_sql
+                try:
+                    df = run_query_fn(sql)
+                except Exception as second_exc:
+                    return {
+                        "error": f"**Lỗi thực thi SQL:** {second_exc}\n\nHãy thử diễn đạt lại câu hỏi của bạn.",
+                        "insights": None,
+                        "sql": sql,
+                        "data": None,
+                        "chart_fig": None,
+                        "summary": f"SQL error for: {question}",
+                    }
+            else:
+                return {
+                    "error": f"**Lỗi thực thi SQL:** {first_exc}\n\nHãy thử diễn đạt lại câu hỏi của bạn.",
+                    "insights": None,
+                    "sql": sql,
+                    "data": None,
+                    "chart_fig": None,
+                    "summary": f"SQL error for: {question}",
+                }
 
         if df.empty:
             return {
@@ -245,6 +284,27 @@ class DataChatAI:
             return {"sql": sql} if sql else {"sql": None, "message": f"Failed to parse AI response: {raw[:200]}"}
         except Exception as exc:
             raise AIError(f"Azure OpenAI API error: {exc}") from exc
+
+    def _fix_sql(self, sql: str, error: str) -> dict | None:
+        """Ask AI to fix a broken SQL query given the SQL Server error message."""
+        user_msg = f"Original SQL:\n{sql}\n\nError:\n{error}\n\nFix the SQL."
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {"role": "system", "content": _SQL_FIX_SYSTEM},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_completion_tokens=4000,
+            )
+            raw = resp.choices[0].message.content or ""
+            parsed = _parse_json(raw)
+            if parsed is not None:
+                return parsed
+            sql_fixed = _extract_sql_from_text(raw)
+            return {"sql": sql_fixed} if sql_fixed else None
+        except Exception:
+            return None
 
     def _generate_insights(self, question: str, sql: str, df: pd.DataFrame) -> dict:
         col_info = {col: str(df[col].dtype) for col in df.columns}
