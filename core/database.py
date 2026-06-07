@@ -33,8 +33,17 @@ def is_fabric() -> bool:
 
 @st.cache_resource(ttl=2400)
 def _get_fabric_token():
-    from azure.identity import DefaultAzureCredential
-    credential = DefaultAzureCredential()
+    sp = st.secrets.get("fabric_sp", {})
+    if sp.get("tenant_id") and sp.get("client_id") and sp.get("client_secret"):
+        from azure.identity import ClientSecretCredential
+        credential = ClientSecretCredential(
+            tenant_id=sp["tenant_id"],
+            client_id=sp["client_id"],
+            client_secret=sp["client_secret"],
+        )
+    else:
+        from azure.identity import DefaultAzureCredential
+        credential = DefaultAzureCredential()
     token = credential.get_token("https://database.windows.net/.default")
     return token.token
 
