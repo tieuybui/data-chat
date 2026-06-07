@@ -222,7 +222,7 @@ with st.sidebar:
     # Schema stats
     if "_schema_info" in st.session_state:
         info = st.session_state["_schema_info"]
-        st.caption(f"Schema: **{info['tables']}** bảng · **{info['cols']}** cột")
+        st.caption(f"Schema: **{info['tables']}** bảng")
 
 
 # ─── Main area ────────────────────────────────────────────────────────────────
