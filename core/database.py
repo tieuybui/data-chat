@@ -4,6 +4,7 @@ Supports Local SQL Server (SQLAlchemy) and Fabric Lakehouse (pyodbc + Azure AD t
 """
 
 import struct
+from urllib.parse import quote_plus
 
 import pyodbc
 import streamlit as st
@@ -91,7 +92,7 @@ def list_fabric_databases() -> list[str]:
 @st.cache_resource
 def _get_engine(env_key: str):
     odbc_string = ENV_CONFIGS[env_key]["odbc"]
-    return create_engine(f"mssql+pyodbc:///?odbc_connect={odbc_string}")
+    return create_engine(f"mssql+pyodbc:///?odbc_connect={quote_plus(odbc_string)}")
 
 
 def run_query(sql: str, params: dict | None = None) -> pd.DataFrame:
