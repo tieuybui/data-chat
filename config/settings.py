@@ -1,10 +1,9 @@
 """
-Environment configs for Fabric Lakehouse and Local SQL Server connections.
-Adapted from data-catalog project.
+Environment configs — all values read from st.secrets (secrets.toml).
 """
 
-import os
 import pyodbc
+import streamlit as st
 
 # ─── ODBC Driver Detection ────────────────────────────────
 ODBC_DRIVER: str | None = None
@@ -13,18 +12,18 @@ for _drv in ["ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"]:
         ODBC_DRIVER = _drv
         break
 
-# ─── Environment Variables ────────────────────────────────
-FABRIC_SERVER = os.environ.get("FABRIC_SERVER", "")
-FABRIC_DATABASE = os.environ.get("FABRIC_DATABASE", "")
-LOCAL_SERVER = os.environ.get("LOCAL_SERVER", ".")
-LOCAL_DATABASE = os.environ.get("LOCAL_DATABASE", "")
+# ─── Secrets ──────────────────────────────────────────────
+FABRIC_SERVER   = st.secrets.get("fabric", {}).get("server", "")
+FABRIC_DATABASE = st.secrets.get("fabric", {}).get("database", "")
+LOCAL_SERVER    = st.secrets.get("local", {}).get("server", ".")
+LOCAL_DATABASE  = st.secrets.get("local", {}).get("database", "")
 
-AZURE_OPENAI_KEY = os.environ.get("AZURE_OPENAI_KEY", "")
-AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
-AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5")
+AZURE_OPENAI_ENDPOINT   = st.secrets.get("azure_openai", {}).get("endpoint", "")
+AZURE_OPENAI_KEY        = st.secrets.get("azure_openai", {}).get("key", "")
+AZURE_OPENAI_DEPLOYMENT = st.secrets.get("azure_openai", {}).get("deployment", "gpt-5")
 
-APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+APP_USERNAME = st.secrets.get("username", "admin")
+APP_PASSWORD = st.secrets.get("password", "")
 
 
 def fabric_odbc(database: str) -> str:

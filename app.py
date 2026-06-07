@@ -4,9 +4,6 @@ Ask questions in natural language; AI generates SQL, executes it, and returns
 insights + interactive charts.
 """
 
-from dotenv import load_dotenv
-load_dotenv()
-
 import streamlit as st
 from streamlit_local_storage import LocalStorage
 
