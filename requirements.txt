@@ -5,3 +5,4 @@ azure-identity
 pyodbc
 openai>=1.30.0
 plotly>=5.20.0
+streamlit-local-storage
