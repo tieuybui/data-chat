@@ -20,8 +20,10 @@ Review dimensions:
 - Sources: schema-qualified table names, joined tables, and whether the query uses tables available in the schema.
 - Safety: only SELECT/read-only queries are acceptable.
 
-The user may provide a natural-language requirement, an expected source, and a SQL query
-in any format. Infer the pieces if labels are missing.
+The user must provide a natural-language requirement and a SQL query.
+Expected sources are optional. If expected sources are not provided, evaluate source correctness
+by checking whether the SQL uses schema-qualified tables that exist in the database schema and
+appear relevant to the requirement.
 
 Respond ONLY with valid JSON:
 
@@ -47,6 +49,7 @@ Scoring:
 
 Rules:
 - Be conservative. If the requirement or SQL is missing, return warning/fail and explain what is missing.
+- Do not penalize missing expected sources. Only compare against expected_sources when the user provides them.
 - Do not hallucinate unavailable tables or columns.
 - If suggesting corrected_sql, keep it SELECT-only and use schema-qualified table names.
 - Keep arrays concise, max 6 items each.
@@ -131,7 +134,7 @@ def _fallback_result(message: str, reason: str) -> dict:
         "source_issues": [] if sources else ["Không tìm thấy source/table rõ ràng trong nội dung."],
         "safety_issues": unsafe,
         "notes": reason,
-        "recommendation": "Bổ sung requirement, expected source và SQL để đánh giá chính xác hơn.",
+        "recommendation": "Bổ sung yêu cầu nghiệp vụ và SQL để đánh giá chính xác hơn. Source kỳ vọng là tùy chọn.",
         "corrected_sql": None,
     }
 

@@ -375,11 +375,10 @@ with evaluator_tab:
             with st.chat_message("assistant"):
                 st.markdown(
                     """
-Paste requirement, expected source và SQL cần kiểm tra. Ví dụ:
+Paste yêu cầu và SQL cần kiểm tra. Source kỳ vọng (optional) có thể thêm nếu cần.
 
 ```text
 Yêu cầu: doanh thu theo tháng trong năm 2026, chỉ lấy đơn đã hoàn tất
-Source kỳ vọng: dbo.FactSales, dbo.DimDate
 SQL:
 SELECT ...
 ```
@@ -394,7 +393,7 @@ SELECT ...
                     st.markdown(msg["content"])
 
     evaluator_prompt = st.chat_input(
-        "Paste requirement + source kỳ vọng + SQL để đánh giá...",
+        "Paste yêu cầu + SQL để đánh giá...",
         disabled=not ai_ready,
         key="query_evaluator_input",
     )
