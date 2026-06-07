@@ -31,22 +31,29 @@ ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
 
 
 def get_schema_context() -> str:
-    """Return cached schema context string for the current environment."""
-    env = st.session_state.get("env", "")
-    cache_key = f"_schema_ctx_{env}"
-    if cache_key not in st.session_state:
-        st.session_state[cache_key] = _build_schema_context()
-    return st.session_state[cache_key]
+    """Return cached schema context string for the current environment/database."""
+    env, database = _schema_cache_identity()
+    return _build_schema_context(env, database)
 
 
 def invalidate_schema_cache():
+    _build_schema_context.clear()
+    st.session_state.pop("_schema_info", None)
+
+
+def _schema_cache_identity() -> tuple[str, str]:
     env = st.session_state.get("env", "")
-    st.session_state.pop(f"_schema_ctx_{env}", None)
+    if env == "fabric":
+        return env, st.session_state.get("fabric_database", "")
+    return env, env
 
 
-def _build_schema_context() -> str:
+@st.cache_data(show_spinner=False)
+def _build_schema_context(env: str, database: str) -> str:
+    """Load table/schema/column metadata once per environment/database."""
     from core.database import run_query
 
+    print(f"\n[SCHEMA CACHE MISS] env={env}, database={database}")
     tables_df = run_query(_TABLES_SQL)
     cols_df = run_query(_COLUMNS_SQL)
     print(f"\n[SCHEMA] {len(tables_df)} tables loaded")

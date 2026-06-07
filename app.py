@@ -12,6 +12,7 @@ from core.auth import check_password, restore_auth, logout
 from core.database import list_fabric_databases, check_odbc_driver, run_query
 from services.schema import get_schema_context, invalidate_schema_cache
 from services.azure_ai import DataChatAI, AIError
+from services.query_evaluator import QueryEvaluatorAI, QueryEvaluationError
 from ui.css import inject_css
 
 # ─── Auth (y chang data-catalog) ──────────────────────────────────────────────
@@ -56,6 +57,66 @@ def render_response(resp: dict):
             st.code(resp["sql"], language="sql")
 
 
+def render_evaluation_response(resp: dict):
+    if resp.get("error"):
+        st.error(resp["error"])
+        return
+
+    verdict = resp.get("verdict", "warning")
+    verdict_label = {
+        "pass": "Đạt",
+        "warning": "Cần kiểm tra",
+        "fail": "Không đạt",
+    }.get(verdict, "Cần kiểm tra")
+
+    if verdict == "pass":
+        st.success(f"**Kết luận:** {verdict_label}")
+    elif verdict == "fail":
+        st.error(f"**Kết luận:** {verdict_label}")
+    else:
+        st.warning(f"**Kết luận:** {verdict_label}")
+
+    col1, col2 = st.columns(2)
+    col1.metric("Đúng điều kiện", f"{resp.get('condition_score', 0)}/100")
+    col2.metric("Đúng source", f"{resp.get('source_score', 0)}/100")
+
+    if resp.get("notes"):
+        st.markdown(resp["notes"])
+
+    used_sources = resp.get("used_sources") or []
+    expected_sources = resp.get("expected_sources") or []
+    if used_sources or expected_sources:
+        with st.expander("🗄️ Source", expanded=True):
+            if expected_sources:
+                st.markdown("**Source kỳ vọng:** " + ", ".join(f"`{src}`" for src in expected_sources))
+            if used_sources:
+                st.markdown("**Source query đang dùng:** " + ", ".join(f"`{src}`" for src in used_sources))
+
+    issues = []
+    for label, key in [
+        ("Thiếu/sai điều kiện", "missing_conditions"),
+        ("Vấn đề source", "source_issues"),
+        ("Vấn đề an toàn", "safety_issues"),
+    ]:
+        values = resp.get(key) or []
+        if values:
+            issues.append((label, values))
+
+    if issues:
+        with st.expander("⚠️ Điểm cần sửa", expanded=True):
+            for label, values in issues:
+                st.markdown(f"**{label}**")
+                for value in values:
+                    st.markdown(f"- {value}")
+
+    if resp.get("recommendation"):
+        st.info(resp["recommendation"])
+
+    if resp.get("corrected_sql"):
+        with st.expander("✅ SQL đề xuất", expanded=False):
+            st.code(resp["corrected_sql"], language="sql")
+
+
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -84,7 +145,6 @@ with st.sidebar:
     if chosen_env != prev_env:
         st.session_state.env = chosen_env
         st.session_state.pop("fabric_database", None)
-        invalidate_schema_cache()
         st.rerun()
 
     # Fabric database selector
@@ -111,7 +171,6 @@ with st.sidebar:
         )
         if chosen_db != prev_db:
             st.session_state.fabric_database = chosen_db
-            invalidate_schema_cache()
             st.rerun()
 
     st.divider()
@@ -157,6 +216,7 @@ with st.sidebar:
     with col2:
         if st.button("🗑️ Xóa chat", use_container_width=True):
             st.session_state.messages = []
+            st.session_state.evaluator_messages = []
             st.rerun()
 
     # Schema stats
@@ -169,23 +229,14 @@ with st.sidebar:
 
 check_odbc_driver()
 
-# Load schema (cached in session state per env)
-if get_schema_context.__name__ and "_schema_loaded" not in st.session_state:
-    with st.spinner("Đang tải cấu trúc database..."):
-        try:
-            schema_text = get_schema_context()
-            # Cache stats for sidebar display
-            st.session_state["_schema_info"] = {
-                "tables": schema_text.count("TABLE:"),
-                "cols": schema_text.count("\n  - "),
-            }
-            st.session_state["_schema_loaded"] = True
-        except Exception as exc:
-            st.error(f"Không thể tải schema: {exc}")
-            st.stop()
-else:
+# Load schema metadata once per environment/database, then reuse cache.
+with st.spinner("Đang tải cấu trúc database..."):
     try:
         schema_text = get_schema_context()
+        st.session_state["_schema_info"] = {
+            "tables": schema_text.count("TABLE:"),
+            "cols": schema_text.count("\n  - "),
+        }
     except Exception as exc:
         st.error(f"Không thể tải schema: {exc}")
         st.stop()
@@ -200,15 +251,20 @@ st.caption(
     f"{info.get('cols', '?')} cột"
 )
 
-# Initialize chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+data_tab, evaluator_tab = st.tabs(["💬 Data Chat", "✅ Đánh giá query"])
 
-# Greeting for empty chat
-if not st.session_state.messages:
-    with st.chat_message("assistant"):
-        st.markdown(
-            """
+with data_tab:
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    data_history = st.container()
+    with data_history:
+        # Greeting for empty chat
+        if not st.session_state.messages:
+            with st.chat_message("assistant"):
+                st.markdown(
+                    """
 👋 **Xin chào! Tôi có thể giúp bạn phân tích dữ liệu trong lakehouse.**
 
 Hãy đặt câu hỏi bằng tiếng Việt hoặc tiếng Anh. Ví dụ:
@@ -218,90 +274,177 @@ Hãy đặt câu hỏi bằng tiếng Việt hoặc tiếng Anh. Ví dụ:
 - *"Sản phẩm nào có tỷ lệ trả hàng cao nhất?"*
 - *"Có bao nhiêu đơn hàng bị delay trong quý này?"*
 """
-        )
-
-# Render existing chat history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        if msg["role"] == "assistant":
-            render_response(msg)
-        else:
-            st.markdown(msg["content"])
-
-# ─── Chat Input ───────────────────────────────────────────────────────────────
-
-prompt = st.chat_input(
-    "Hỏi về dữ liệu của bạn...",
-    disabled=not ai_ready,
-)
-
-if prompt:
-    # Show user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Build history for AI context (last 8 turns, use summaries for assistant)
-    history = []
-    for m in st.session_state.messages[:-1]:
-        if m["role"] == "user":
-            history.append({"role": "user", "content": m["content"]})
-        elif m["role"] == "assistant":
-            summary = m.get("summary") or m.get("insights") or ""
-            if summary:
-                history.append({"role": "assistant", "content": summary})
-    history = history[-8:]
-
-    # Generate response
-    with st.chat_message("assistant"):
-        status = st.status("Đang phân tích...", expanded=False)
-
-        try:
-            ai = DataChatAI(
-                api_key=api_key,
-                endpoint=endpoint,
-                deployment=deployment,
-            )
-
-            with status:
-                st.write("Đang tạo truy vấn SQL...")
-                resp = ai.answer(
-                    question=prompt,
-                    schema=schema_text,
-                    history=history,
-                    run_query_fn=run_query,
                 )
 
-            status.update(label="Hoàn thành ✓", state="complete", expanded=False)
+        # Render existing chat history
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                if msg["role"] == "assistant":
+                    render_response(msg)
+                else:
+                    st.markdown(msg["content"])
 
-        except AIError as exc:
-            status.update(label="Lỗi", state="error")
-            resp = {
-                "error": str(exc),
-                "insights": None,
-                "sql": None,
-                "data": None,
-                "chart_fig": None,
-                "summary": f"Error: {exc}",
-            }
-        except Exception as exc:
-            status.update(label="Lỗi không mong đợi", state="error")
-            resp = {
-                "error": f"Lỗi: {exc}",
-                "insights": None,
-                "sql": None,
-                "data": None,
-                "chart_fig": None,
-                "summary": f"Unexpected error: {exc}",
-            }
+    # ─── Chat Input ───────────────────────────────────────────────────────────
 
-        render_response(resp)
+    prompt = st.chat_input(
+        "Hỏi về dữ liệu của bạn...",
+        disabled=not ai_ready,
+        key="data_chat_input",
+    )
 
-    # Save to history (without the DataFrame to keep session state lean)
-    resp_to_store = {k: v for k, v in resp.items() if k != "data"}
-    resp_to_store["role"] = "assistant"
-    # Re-attach data shape info for display on re-render
-    df = resp.get("data")
-    if df is not None:
-        resp_to_store["data"] = df
-    st.session_state.messages.append(resp_to_store)
+    if prompt:
+        # Show user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with data_history:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+        # Build history for AI context (last 8 turns, use summaries for assistant)
+        history = []
+        for m in st.session_state.messages[:-1]:
+            if m["role"] == "user":
+                history.append({"role": "user", "content": m["content"]})
+            elif m["role"] == "assistant":
+                summary = m.get("summary") or m.get("insights") or ""
+                if summary:
+                    history.append({"role": "assistant", "content": summary})
+        history = history[-8:]
+
+        # Generate response
+        with data_history:
+            with st.chat_message("assistant"):
+                status = st.status("Đang phân tích...", expanded=False)
+
+                try:
+                    ai = DataChatAI(
+                        api_key=api_key,
+                        endpoint=endpoint,
+                        deployment=deployment,
+                    )
+
+                    with status:
+                        st.write("Đang tạo truy vấn SQL...")
+                        resp = ai.answer(
+                            question=prompt,
+                            schema=schema_text,
+                            history=history,
+                            run_query_fn=run_query,
+                        )
+
+                    status.update(label="Hoàn thành ✓", state="complete", expanded=False)
+
+                except AIError as exc:
+                    status.update(label="Lỗi", state="error")
+                    resp = {
+                        "error": str(exc),
+                        "insights": None,
+                        "sql": None,
+                        "data": None,
+                        "chart_fig": None,
+                        "summary": f"Error: {exc}",
+                    }
+                except Exception as exc:
+                    status.update(label="Lỗi không mong đợi", state="error")
+                    resp = {
+                        "error": f"Lỗi: {exc}",
+                        "insights": None,
+                        "sql": None,
+                        "data": None,
+                        "chart_fig": None,
+                        "summary": f"Unexpected error: {exc}",
+                    }
+
+                render_response(resp)
+
+        # Save to history (without the DataFrame to keep session state lean)
+        resp_to_store = {k: v for k, v in resp.items() if k != "data"}
+        resp_to_store["role"] = "assistant"
+        # Re-attach data shape info for display on re-render
+        df = resp.get("data")
+        if df is not None:
+            resp_to_store["data"] = df
+        st.session_state.messages.append(resp_to_store)
+
+with evaluator_tab:
+    if "evaluator_messages" not in st.session_state:
+        st.session_state.evaluator_messages = []
+
+    evaluator_history = st.container()
+    with evaluator_history:
+        if not st.session_state.evaluator_messages:
+            with st.chat_message("assistant"):
+                st.markdown(
+                    """
+Paste requirement, expected source và SQL cần kiểm tra. Ví dụ:
+
+```text
+Yêu cầu: doanh thu theo tháng trong năm 2026, chỉ lấy đơn đã hoàn tất
+Source kỳ vọng: dbo.FactSales, dbo.DimDate
+SQL:
+SELECT ...
+```
+"""
+                )
+
+        for msg in st.session_state.evaluator_messages:
+            with st.chat_message(msg["role"]):
+                if msg["role"] == "assistant":
+                    render_evaluation_response(msg)
+                else:
+                    st.markdown(msg["content"])
+
+    evaluator_prompt = st.chat_input(
+        "Paste requirement + source kỳ vọng + SQL để đánh giá...",
+        disabled=not ai_ready,
+        key="query_evaluator_input",
+    )
+
+    if evaluator_prompt:
+        st.session_state.evaluator_messages.append({"role": "user", "content": evaluator_prompt})
+        with evaluator_history:
+            with st.chat_message("user"):
+                st.markdown(evaluator_prompt)
+
+        history = []
+        for m in st.session_state.evaluator_messages[:-1]:
+            if m["role"] == "user":
+                history.append({"role": "user", "content": m["content"]})
+            elif m["role"] == "assistant":
+                content = (
+                    f"Verdict: {m.get('verdict')}. "
+                    f"Condition score: {m.get('condition_score')}. "
+                    f"Source score: {m.get('source_score')}. "
+                    f"Notes: {m.get('notes', '')}"
+                )
+                history.append({"role": "assistant", "content": content})
+        history = history[-8:]
+
+        with evaluator_history:
+            with st.chat_message("assistant"):
+                status = st.status("Đang đánh giá query...", expanded=False)
+
+                try:
+                    evaluator = QueryEvaluatorAI(
+                        api_key=api_key,
+                        endpoint=endpoint,
+                        deployment=deployment,
+                    )
+                    with status:
+                        st.write("Đang kiểm tra điều kiện và source...")
+                        eval_resp = evaluator.evaluate(
+                            message=evaluator_prompt,
+                            schema=schema_text,
+                            history=history,
+                        )
+                    status.update(label="Hoàn thành ✓", state="complete", expanded=False)
+                except QueryEvaluationError as exc:
+                    status.update(label="Lỗi", state="error")
+                    eval_resp = {"role": "assistant", "error": str(exc)}
+                except Exception as exc:
+                    status.update(label="Lỗi không mong đợi", state="error")
+                    eval_resp = {"role": "assistant", "error": f"Lỗi: {exc}"}
+
+                render_evaluation_response(eval_resp)
+
+        eval_resp["role"] = "assistant"
+        st.session_state.evaluator_messages.append(eval_resp)
